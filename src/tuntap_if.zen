@@ -1,0 +1,41 @@
+const std = @import("std");
+
+pub extern "c" fn ioctl(fd: fd_t, request: c_ulong, ...) c_int;
+pub extern "c" fn system(command: [*]const u8) c_int;
+pub extern "c" fn get_tunsetiff() c_ulong;
+
+pub usingnamespace std.os.linux;
+
+pub const IFNAMSIZE = 16;
+pub const IFF_TAP = 0x0002;
+pub const IFF_NO_PI = 0x1000;
+
+pub const ifmap = extern struct {
+    mem_start: u64,
+    mem_end: u64,
+    base_addr: u16,
+    irq: u8,
+    dma: u8,
+    port: u8,
+};
+
+pub const ifreq_addr = extern union {
+    ifr_addr: sockaddr,
+    ifr_dstaddr: sockaddr,
+    ifr_broadaddr: sockaddr,
+    ifr_netmask: sockaddr,
+    ifr_hwaddr: sockaddr,
+    ifr_flags: u16,
+    ifr_ifindex: u32,
+    ifr_metric: u32,
+    ifr_mtu: u32,
+    ifr_map: ifmap,
+    ifr_slave: [IFNAMSIZE]u8,
+    ifr_newname: [IFNAMSIZE]u8,
+    ifr_data: ?[*]const u8,
+};
+
+pub const ifreq = extern struct {
+    ifr_name: [IFNAMSIZE]u8,
+    addr: ifreq_addr,
+};

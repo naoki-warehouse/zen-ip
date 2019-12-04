@@ -1,0 +1,14 @@
+const std = @import("std");
+
+pub const pkt_hdr = packed struct {
+    dmac: u48,
+    smac: u48,
+    eth_type: u16,
+    payload: [*]u8,
+
+    pub const LENGTH = 14;
+
+    fn get_type(self: pkt_hdr) u16 {
+        return std.mem.bigToNative(u16, self.eth_type);
+    }
+};

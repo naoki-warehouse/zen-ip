@@ -1,0 +1,68 @@
+const std = @import("std");
+const tun = @import("tuntap_if.zen");
+const arp = @import("arp.zen");
+const eth = @import("eth.zen");
+const ipv4 = @import("ipv4.zen");
+
+pub const hw_addr = [6]u8{ 0xee, 0x23, 0x2f, 0xe8, 0x16, 0xe3 };
+pub const ipv4_addr = [4]u8{ 10, 0, 0, 5 };
+
+const NetDeviceError = error{
+    FailedToCreateTUN,
+};
+
+const NetDevError = NetDeviceError || std.os.OpenError;
+pub fn create_netdev() NetDevError!std.os.fd_t {
+    const sock = try std.os.openC(c"/dev/net/tun", std.os.O_RDWR, 0);
+    errdefer {
+        std.os.close(sock);
+        std.debug.warn("Failed to open /dev/net/tun\n");
+    }
+
+    const ifr_addr = tun.ifreq_addr{
+        .ifr_flags = tun.IFF_TAP | tun.IFF_NO_PI,
+    };
+
+    const zero = ([1]u8{0}) ** 12;
+
+    var ifr = tun.ifreq{
+        .ifr_name = "test" ++ zero,
+        .addr = ifr_addr,
+    };
+
+    const err = tun.ioctl(sock, tun.get_tunsetiff(), &ifr);
+    if (err < 0) {
+        std.debug.warn("{}", err);
+        return NetDeviceError.FailedToCreateTUN;
+    }
+    std.debug.warn("Successfully Created TUN Device:{}\n", ifr.ifr_name);
+    _ = tun.system(c"ip a add 10.0.0.2/24 dev test");
+    _ = tun.system(c"ip link set test up");
+    return sock;
+}
+
+pub fn recv_loop(sock: std.os.fd_t) void {
+    const arp_stk = arp.arp_stack{};
+    const ipv4_stk = ipv4.ipv4_stack{
+        .arp_stk = &arp_stk,
+    };
+    while (true) {
+        var buf = [_]u8{0} ** 1400;
+        const res = std.os.read(sock, &buf);
+        const recv = @ptrCast(*eth.pkt_hdr, &buf);
+        if ((recv.dmac != 0xFFFFFFFFFFFF) and (recv.dmac != std.mem.readIntNative(u48, @ptrCast(*const [6]u8, &hw_addr)))) {
+            continue;
+        }
+        if (recv.get_type() == 0x0800) {
+            const ipv4_pkt = @ptrCast(*ipv4.pkt_hdr, &buf[eth.pkt_hdr.LENGTH]);
+            ipv4_stk.recv(ipv4_pkt, sock);
+        } else if (recv.get_type() == 0x0806) {
+            const arp_pkt = @ptrCast(*const arp.pkt_hdr, &buf[eth.pkt_hdr.LENGTH]);
+            arp_stk.recv(arp_pkt, sock);
+        }
+    }
+}
+
+pub fn send(sock: std.os.fd_t, buf: []const u8, len: usize) void {
+    const res = std.os.write(sock, buf[0..len]);
+}

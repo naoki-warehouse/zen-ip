@@ -1,0 +1,126 @@
+const std = @import("std");
+const icmp = @import("icmpv4.zen");
+const eth = @import("eth.zen");
+const arp = @import("arp.zen");
+const netdev = @import("netdev.zen");
+
+pub const pkt_hdr = packed struct {
+    header_length: u4,
+    version: u4,
+    tos: u8,
+    total_len: u16,
+    identification: u16,
+    frags: u16,
+    ttl: u8,
+    protocol: u8,
+    chksum: u16,
+    src_addr: u32,
+    dst_addr: u32,
+    payload: [*]u8,
+
+    const PROTOCOL_ICMP = 1;
+};
+
+pub const ipv4_stack = struct {
+    arp_stk: *const arp.arp_stack,
+
+    const TAG = "IPv4";
+
+    fn recv(self: ipv4_stack, ipv4_pkt: *const pkt_hdr, sock: std.os.fd_t) void {
+        //reject other clients packet
+        if (ipv4_pkt.dst_addr != 0xFFFFFFFF and ipv4_pkt.dst_addr != std.mem.readIntNative(u32, @ptrCast(*const [4]u8, &netdev.ipv4_addr))) {
+            return;
+        }
+
+        var saddr_bytes = [_]u8{0} ** 4;
+        var daddr_bytes = [_]u8{0} ** 4;
+        std.mem.writeIntNative(u32, &saddr_bytes, ipv4_pkt.src_addr);
+        std.mem.writeIntNative(u32, &daddr_bytes, ipv4_pkt.dst_addr);
+
+        std.debug.warn("[{}]: Receive ", TAG);
+        std.debug.warn("src:{}.{}.{}.{} ", saddr_bytes[0], saddr_bytes[1], saddr_bytes[2], saddr_bytes[3]);
+        std.debug.warn("dst:{}.{}.{}.{}\n", daddr_bytes[0], daddr_bytes[1], daddr_bytes[2], daddr_bytes[3]);
+        const ipv4_payload_len = std.mem.bigToNative(u16, ipv4_pkt.total_len) - (@intCast(u16, ipv4_pkt.header_length) * 4);
+        if (ipv4_pkt.protocol == pkt_hdr.PROTOCOL_ICMP) {
+            //parse icmp packet
+            const icmp_hdr = @intToPtr(*const icmp.pkt_hdr, @ptrToInt(&ipv4_pkt.payload) + (@intCast(u16, ipv4_pkt.header_length) - 5) * 4);
+
+            //recv echo and send echo reply
+            if (icmp_hdr.icmp_type == icmp.pkt_hdr.TYPE_ECHO_REQUEST) {
+                std.debug.warn("[{}]: Receivce echo request\n", "ICMP");
+                const icmp_echo = @ptrCast(*const icmp.pkt_echo, &icmp_hdr.payload);
+                const identity = std.mem.bigToNative(u16, icmp_echo.identity);
+                const seq_id = std.mem.bigToNative(u16, icmp_echo.sequence_id);
+                const icmp_bytes = @ptrCast([*]const u8, icmp_hdr);
+
+                //reject large packet
+                if (ipv4_payload_len > 1400 - eth.pkt_hdr.LENGTH - 20) {
+                    return;
+                }
+
+                //create packet structs
+                var send_buf = [_]u8{0} ** 1400;
+                var send_eth = @ptrCast(*align(1) eth.pkt_hdr, &send_buf);
+                var send_ipv4 = @ptrCast(*align(1) pkt_hdr, &send_buf[eth.pkt_hdr.LENGTH]);
+                var send_ipv4_bytes = @ptrCast([*]u8, send_ipv4);
+                var send_icmp = @ptrCast(*icmp.pkt_hdr, &send_buf[eth.pkt_hdr.LENGTH + 20]);
+                var send_icmp_bytes = @ptrCast([*]u8, send_icmp);
+
+                //copy icmp payload (this is adhoc operation to reply ping)
+                @memcpy(send_icmp_bytes, icmp_bytes, ipv4_payload_len);
+                send_icmp.icmp_type = icmp.pkt_hdr.TYPE_ECHO_REPLY;
+                send_icmp.chksum = 0;
+                send_icmp.chksum = std.mem.nativeToBig(u16, icmp.calc_chksum(send_icmp_bytes, ipv4_payload_len));
+
+                //create ipv4 header
+                send_ipv4.version = @intCast(u4, 4);
+                send_ipv4.header_length = @intCast(u4, 5);
+                send_ipv4.tos = 0;
+                send_ipv4.total_len = std.mem.nativeToBig(u16, 20 + ipv4_payload_len);
+                send_ipv4.identification = 0;
+                send_ipv4.frags = 0;
+                send_ipv4.ttl = 1;
+                send_ipv4.protocol = pkt_hdr.PROTOCOL_ICMP;
+                send_ipv4.chksum = 0;
+                send_ipv4.src_addr = std.mem.readIntNative(u32, @ptrCast(*const [4]u8, &netdev.ipv4_addr));
+                send_ipv4.dst_addr = ipv4_pkt.src_addr;
+                send_ipv4.chksum = std.mem.nativeToBig(u16, calc_chksum(send_ipv4_bytes, 20));
+
+                //create eth header
+                send_eth.smac = std.mem.readIntNative(u48, @ptrCast(*const [6]u8, &netdev.hw_addr));
+
+                //search arp table
+                const saddr = @ptrCast(*const [4]u8, &ipv4_pkt.src_addr);
+                const res = self.arp_stk.find_mac_by_ip(saddr);
+                if (res) |arp_mac| {
+                    //std.debug.warn("{X}:{X}:{X}:{X}:{X}:{X}\n", arp_mac[0], arp_mac[1], arp_mac[2], arp_mac[3], arp_mac[4], arp_mac[5]);
+                    send_eth.dmac = std.mem.readIntNative(u48, @ptrCast(*const [6]u8, &arp_mac[0]));
+                } else {
+                    //give up to reply when not found
+                    std.debug.warn("Not Found\n");
+                    return;
+                }
+                send_eth.eth_type = std.mem.nativeToBig(u16, 0x0800);
+                netdev.send(sock, &send_buf, eth.pkt_hdr.LENGTH + 20 + ipv4_payload_len);
+                std.debug.warn("[{}]: Send echo reply\n", "ICMP");
+            }
+        }
+    }
+};
+
+pub fn calc_chksum(data: [*]u8, len: usize) u16 {
+    var chksum: u32 = 0;
+    var idx: usize = 0;
+    while (idx < len) : (idx += 2) {
+        if (idx + 1 >= len) {
+            chksum += (@intCast(u16, data[idx]) << 8) + 0;
+        } else {
+            chksum += (@intCast(u16, data[idx]) << 8) + @intCast(u16, data[idx + 1]);
+        }
+        if (chksum > 0xFFFF) {
+            chksum = (chksum & 0xFFFF) + 1;
+        }
+    }
+
+    return @intCast(u16, (~chksum) & 0xFFFF);
+}

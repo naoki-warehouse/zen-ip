@@ -1,0 +1,87 @@
+const std = @import("std");
+const eth = @import("eth.zen");
+const netdev = @import("netdev.zen");
+
+pub const pkt_hdr = packed struct {
+    hwtype: u16,
+    protype: u16,
+    hwsize: u8,
+    prosize: u8,
+    op: u16,
+    sha: u48,
+    spa: u32,
+    tha: u48,
+    tpa: u32,
+
+    const LENGTH = 28;
+
+    const HWTYPE_ETHERNET = 0x0001;
+    const PROTYPE_IPV4 = 0x0800;
+    const OPCODE_REQUEST = 0x0001;
+    const OPCODE_REPLY = 0x0002;
+
+    fn print_types(self: arp_header) void {
+        std.debug.warn("HardwareType:{} ProtocolType:{}\n", @byteSwap(u16, self.hwtype), @byteSwap(u16, self.protype));
+    }
+
+    fn print_all(self: arp_header) void {
+        print_types(self);
+    }
+};
+
+pub const arp_stack = struct {
+    const TAG = "ARP";
+    var ip_mac_map = std.container.BufMap{ .allocator = &std.heap.c_allocator };
+    fn recv(self: arp_stack, arp_pkt: *const pkt_hdr, sock: std.os.fd_t) void {
+        const hwtype = std.mem.bigToNative(u16, arp_pkt.hwtype);
+        const protype = std.mem.bigToNative(u16, arp_pkt.protype);
+
+        if (hwtype != pkt_hdr.HWTYPE_ETHERNET) {
+            std.debug.warn("ARP: Unsupported HardwareType:{}\n", hwtype);
+            return;
+        }
+
+        if (protype != pkt_hdr.PROTYPE_IPV4) {
+            std.debug.warn("ARP: Unsupported ProtocolType:{}\n", protype);
+            return;
+        }
+
+        const opcode = std.mem.bigToNative(u16, arp_pkt.op);
+        if (opcode == pkt_hdr.OPCODE_REQUEST) {
+            std.debug.warn("[{}]: Receivce ARP Request\n", TAG);
+            var buf = [_]u8{0} ** (eth.pkt_hdr.LENGTH + pkt_hdr.LENGTH);
+            var send_arp = @ptrCast(*align(1) pkt_hdr, &buf[eth.pkt_hdr.LENGTH]);
+            var send_eth = @ptrCast(*align(1) eth.pkt_hdr, &buf);
+
+            send_arp.hwtype = std.mem.nativeToBig(u16, pkt_hdr.HWTYPE_ETHERNET);
+            send_arp.hwsize = 6;
+            send_arp.protype = std.mem.nativeToBig(u16, pkt_hdr.PROTYPE_IPV4);
+            send_arp.prosize = 4;
+            send_arp.op = std.mem.nativeToBig(u16, pkt_hdr.OPCODE_REPLY);
+            send_arp.sha = std.mem.readIntNative(u48, @ptrCast(*const [6]u8, &netdev.hw_addr));
+            send_arp.spa = std.mem.readIntNative(u32, @ptrCast(*const [4]u8, &netdev.ipv4_addr));
+            send_arp.tha = arp_pkt.sha;
+            send_arp.tpa = arp_pkt.spa;
+
+            send_eth.dmac = send_arp.tha;
+            send_eth.smac = send_arp.sha;
+            send_eth.eth_type = std.mem.nativeToBig(u16, 0x0806);
+
+            //insert ip and mac to arp table
+            var sha_bytes = [_]u8{0} ** 6;
+            var spa_bytes = [_]u8{0} ** 4;
+            std.mem.writeIntNative(u48, &sha_bytes, arp_pkt.sha);
+            std.mem.writeIntNative(u32, &spa_bytes, arp_pkt.spa);
+            std.debug.warn("[{}]: ARP Table Insert ", TAG);
+            std.debug.warn("{x:2}:{x:2}:{x:2}:{x:2}:{x:2}:{x:2} ", sha_bytes[0], sha_bytes[1], sha_bytes[2], sha_bytes[3], sha_bytes[4], sha_bytes[5]);
+            std.debug.warn("- {}.{}.{}.{}\n", spa_bytes[0], spa_bytes[1], spa_bytes[2], spa_bytes[3]);
+            const res = ip_mac_map.set(spa_bytes, sha_bytes);
+
+            netdev.send(sock, &buf, buf.len);
+        }
+    }
+
+    fn find_mac_by_ip(self: arp_stack, ip: *const [4]u8) ?[]const u8 {
+        return ip_mac_map.get(ip);
+    }
+};

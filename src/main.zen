@@ -1,0 +1,18 @@
+const std = @import("std");
+const eth = @import("eth.zen");
+const ipv6 = @import("ipv6.zen");
+const ipv4 = @import("ipv4.zen");
+const arp = @import("arp.zen");
+const netdev = @import("netdev.zen");
+
+pub usingnamespace @import("tuntap_if.zen");
+
+pub fn main() anyerror!void {
+    const dev = netdev.create_netdev();
+
+    if (dev) |value| {
+        netdev.recv_loop(value);
+    } else |err| {
+        std.os.exit(1);
+    }
+}
